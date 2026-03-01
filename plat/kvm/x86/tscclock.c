@@ -61,6 +61,15 @@
 #include <uk/print.h>
 #include <uk/assert.h>
 #include <uk/atomic.h>
+#include <uk/libparam.h>
+
+/* Boot time in nanoseconds since epoch, provided by VMM via command line.
+ * If non-zero, this overrides the CMOS RTC read which may not work on
+ * hypervisors like Firecracker that don't emulate the RTC.
+ */
+static __u64 cmdline_boot_time_ns = 0;
+UK_LIBPARAM_PARAM(cmdline_boot_time_ns, __u64,
+    "Boot wall-clock time in nanoseconds since Unix epoch");
 
 #define TIMER_CNTR           0x40
 #define TIMER_MODE           0x43
@@ -232,8 +241,18 @@ int tscclock_init(void)
 	/*
 	 * Read RTC "time at boot". This must be done just before tsc_base is
 	 * initialised in order to get a correct offset below.
+	 *
+	 * If boot time was provided via command line, use it instead of RTC.
+	 * This is needed for hypervisors like Firecracker that don't emulate
+	 * the CMOS RTC on x86_64.
 	 */
-	rtc_boot = rtc_gettimeofday();
+	if (cmdline_boot_time_ns > 0) {
+		rtc_boot = cmdline_boot_time_ns;
+		uk_pr_info("Using cmdline boot time: %llu ns\n",
+			   (unsigned long long)rtc_boot);
+	} else {
+		rtc_boot = rtc_gettimeofday();
+	}
 
 	/*
 	 * Attempt to retrieve TSC frequency via the hypervisor generic cpuid
