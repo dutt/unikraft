@@ -8,6 +8,10 @@ COMPFLAGS    += -nostdlib
 COMPFLAGS    += -U __linux__ -U __FreeBSD__ -U __sun__ -nostdinc
 COMPFLAGS-$(call have_gcc)	+= -fno-tree-sra -fno-split-stack
 
+# GCC 15 defaults to C23 where () means (void), breaking code that uses
+# () to mean "unspecified parameters". Force gnu17 for compatibility.
+COMPFLAGS-$(call gcc_version_ge,15,0)	+= -std=gnu17
+
 ifneq ($(HAVE_STACKPROTECTOR),y)
 COMPFLAGS    += -fno-stack-protector
 endif
