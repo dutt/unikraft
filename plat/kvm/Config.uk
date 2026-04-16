@@ -45,7 +45,7 @@ config KVM_BOOT_PROTO_MULTIBOOT
 
 config KVM_BOOT_PROTO_LXBOOT
 	bool "Lxboot"
-	depends on KVM_VMM_FIRECRACKER || (KVM_VMM_QEMU && ARCH_ARM_64)
+	depends on KVM_VMM_FIRECRACKER || KVM_VMM_CLODDY || (KVM_VMM_QEMU && ARCH_ARM_64)
 	help
 		Linux 64-bit Boot Protocol
 
@@ -132,6 +132,25 @@ config KVM_VMM_FIRECRACKER
 	imply LIBUKINTCTLR_GICV3 if ARCH_ARM_64
 	imply LIBUKRTC_PL031
 	depends on ARCH_X86_64 || ARCH_ARM_64
+
+config KVM_VMM_CLODDY
+	bool "Cloddy VMM"
+	select KVM_BOOT_PROTO_LXBOOT
+	select HAVE_IBMPC_NS16550 if ARCH_X86_64
+	select HAVE_IBMPC_PS2 if ARCH_X86_64
+	select HAVE_MMIO
+	select VIRTIO_MMIO_LINUX_COMPAT_CMDLINE if LIBVIRTIO_MMIO
+	imply LIBNS16550 if LIBUKCONSOLE
+	imply LIBNS16550_EARLY_CONSOLE if LIBUKCONSOLE
+	imply LIBNS16550_COM1 if LIBUKCONSOLE && ARCH_X86_64
+	imply LIBUKPS2 if ARCH_X86_64
+	imply LIBUKPS2_KBD if ARCH_X86_64
+	imply LIBUKRANDOM_LCPU if LIBUKRANDOM
+	depends on ARCH_X86_64
+	help
+		Cloddy custom VMM with exit port and comm page support.
+		Similar to Firecracker but uses PIO exit port for clean
+		shutdown with real exit codes.
 
 endchoice
 endif

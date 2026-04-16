@@ -23,6 +23,19 @@
  */
 static const struct uk_pm_ops *pm_ops;
 
+/* Application exit code — set by boot code, read by PM ops during shutdown */
+static int _pm_exit_code;
+
+void uk_pm_set_exit_code(int code)
+{
+	_pm_exit_code = code;
+}
+
+int uk_pm_get_exit_code(void)
+{
+	return _pm_exit_code;
+}
+
 int uk_pm_ops_register(const struct uk_pm_ops *ops)
 {
 	const struct uk_pm_ops *expected = __NULL;
