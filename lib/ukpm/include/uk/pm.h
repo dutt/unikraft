@@ -116,6 +116,18 @@ struct uk_pm_ops {
 int uk_pm_ops_register(const struct uk_pm_ops *ops) __isr;
 
 /**
+ * Set the application exit code before shutdown.
+ * Called by boot code so platform PM ops can report it to the VMM.
+ */
+void uk_pm_set_exit_code(int code);
+
+/**
+ * Get the application exit code during shutdown.
+ * Called by platform PM ops to include in the shutdown signal.
+ */
+int uk_pm_get_exit_code(void);
+
+/**
  * NOTE:
  * The event handlers should never return UK_EVENT_HANDLED as that
  * would prevent propagating the event to the rest of the handlers.
@@ -168,6 +180,9 @@ void uk_pm_raise_shutdown_event(enum uk_pm_shutdown_op op) __isr;
 void uk_pm_shutdown(enum uk_pm_shutdown_op op) __noreturn __isr;
 #else /* !CONFIG_LIBUKPM */
 /* Fallbacks */
+static inline void uk_pm_set_exit_code(int code __unused) {}
+static inline int uk_pm_get_exit_code(void) { return 0; }
+
 __noreturn __isr static inline void uk_pm_syshalt(void)
 {
 	_uk_pm_syshalt_fallback();

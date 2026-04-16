@@ -112,6 +112,35 @@ static inline void _check_ospke(void)
 }
 #endif /* CONFIG_HAVE_X86PKU */
 
+#if CONFIG_KVM_VMM_CLODDY
+#include <kvm/comm_page.h>
+
+static void _comm_page_init(void)
+{
+	volatile struct comm_page_header *cp =
+		(volatile struct comm_page_header *)COMM_PAGE_GPA;
+
+	if (*(volatile __u64 *)cp->magic != COMM_PAGE_MAGIC_LE64) {
+		uk_pr_warn("cloddy comm page magic mismatch at 0x%x\n",
+			   COMM_PAGE_GPA);
+		return;
+	}
+
+	if (cp->version < COMM_PAGE_VERSION) {
+		uk_pr_warn("cloddy comm page version %u < expected %u\n",
+			   cp->version, COMM_PAGE_VERSION);
+		return;
+	}
+
+	uk_pr_info("cloddy comm page v%u (flags=0x%x)\n",
+		   cp->version, cp->flags);
+
+	/* TODO Phase 3: seed ukrandom with cp->entropy[32] */
+	/* TODO Phase 3: store network config for LWIP init */
+	/* TODO Phase 4: check COMM_FLAG_RESUMED for snapshot resume */
+}
+#endif /* CONFIG_KVM_VMM_CLODDY */
+
 static void __noreturn ukplat_entry2(void *arg __unused)
 {
 	/* It's not possible to unwind past this function, because the stack
@@ -166,6 +195,10 @@ void _ukplat_entry(struct ukplat_bootinfo *bi)
 	rc = ukplat_mem_init();
 	if (unlikely(rc))
 		UK_CRASH("Mem init failed: %d\n", rc);
+
+#if CONFIG_KVM_VMM_CLODDY
+	_comm_page_init();
+#endif
 
 #ifdef CONFIG_HAVE_SYSCALL
 	_init_syscall();

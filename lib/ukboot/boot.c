@@ -41,6 +41,7 @@
 #include <errno.h>
 
 #include <uk/boot.h>
+#include <uk/pm.h>
 #ifdef CONFIG_LIBUKPAGING
 #include <uk/falloc.h>
 #include <uk/paging.h>
@@ -447,6 +448,7 @@ exit:
 		(*init_entry->term)(&tctx);
 	}
 
+	uk_pm_set_exit_code(tctx.exit_code);
 	uk_pr_debug("Unikraft terminates with exit status %d (target: %d)\n",
 		    tctx.exit_code, tctx.target);
 	uk_pm_shutdown(tctx.target); /* does not return */

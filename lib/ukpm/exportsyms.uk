@@ -1,4 +1,6 @@
 uk_pm_ops_register
+uk_pm_set_exit_code
+uk_pm_get_exit_code
 uk_pm_syscrash
 uk_pm_syshalt
 uk_pm_sysrestart

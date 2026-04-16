@@ -31,6 +31,8 @@ ifeq ($(CONFIG_KVM_VMM_QEMU),y)
 KVM_VMM := qemu
 else ifeq ($(CONFIG_KVM_VMM_FIRECRACKER),y)
 KVM_VMM := fc
+else ifeq ($(CONFIG_KVM_VMM_CLODDY),y)
+KVM_VMM := cloddy
 else
 KVM_VMM := kvm
 endif
