@@ -7,3 +7,4 @@
 UK_DRIV_RANDOM_BASE := $(UK_DRIV_BASE)/ukrandom
 
 $(eval $(call import_lib,$(UK_DRIV_RANDOM_BASE)/lcpu))
+$(eval $(call import_lib,$(UK_DRIV_RANDOM_BASE)/cloddy))
