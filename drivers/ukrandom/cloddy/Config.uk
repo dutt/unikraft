@@ -1,0 +1,13 @@
+menuconfig LIBUKRANDOM_CLODDY
+	bool "Cloddy comm-page seeded randomness"
+	depends on KVM_VMM_CLODDY && LIBUKRANDOM
+	select LIBUKBOOT
+	help
+		Seeds Unikraft's CSPRNG from the 32-byte entropy field in the
+		cloddy-vmm comm page (GPA 0x9000). Registered as an early-tab
+		driver at a priority before the LCPU driver so that, when the
+		comm page is present and valid, cloddy-supplied entropy is used
+		as the CSPRNG seed. When the comm page is absent (e.g. running
+		under a different VMM), this driver returns early and the LCPU
+		driver registers the fallback.
+
