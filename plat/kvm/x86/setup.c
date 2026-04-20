@@ -112,8 +112,42 @@ static inline void _check_ospke(void)
 }
 #endif /* CONFIG_HAVE_X86PKU */
 
+/*
+ * Cloddy comm-page consumer. This routine validates the page and logs
+ * status only. Substantive work happens elsewhere:
+ *   - Entropy seeding: drivers/ukrandom/cloddy/init.c (a ukrandom driver
+ *     registered before the LCPU fallback).
+ *   - Cold-boot netif config: lib-lwip via the netdev.ip= boot arg
+ *     (libparam -> uknetdev einfo).
+ *   - Resume-time netif reconfig: userspace SDKs call into Unikraft via
+ *     the cloddy export table.
+ *   - Userspace post-resume work: sdk/python/src/cloddy/_commpage.py
+ *     re-reads the comm page on each interpreter startup and after
+ *     snapshot resume.
+ *
+ * Do not add a kernel-side re-consumption hook here without a clear
+ * reason -- userspace already covers what's needed today.
+ */
 #if CONFIG_KVM_VMM_CLODDY
 #include <kvm/comm_page.h>
+
+/* Defined in plat/kvm/x86/cloddy.c. See cloddy.c for the lwIP integration. */
+extern int uk_cloddy_reconfig_network(__u32 addr, __u32 netmask, __u32 gateway);
+extern int uk_cloddy_reseed_csprng(void);
+
+static void _cloddy_populate_export_table(void)
+{
+	volatile __u64 *t = (volatile __u64 *)(COMM_PAGE_GPA + CLODDY_EXPORT_TABLE_OFFSET);
+	int i = 0;
+	t[i++] = CLODDY_EXPORT_MAGIC;
+	t[i++] = CLODDY_EXPORT_VERSION;
+	t[i++] = 2;  /* count */
+	t[i++] = CLODDY_EXPORT_ID_RECONFIG_NETWORK;
+	t[i++] = (__u64)(unsigned long)&uk_cloddy_reconfig_network;
+	t[i++] = CLODDY_EXPORT_ID_RESEED_CSPRNG;
+	t[i++] = (__u64)(unsigned long)&uk_cloddy_reseed_csprng;
+	uk_pr_info("cloddy: export table populated (2 entries)\n");
+}
 
 static void _comm_page_init(void)
 {
@@ -135,9 +169,28 @@ static void _comm_page_init(void)
 	uk_pr_info("cloddy comm page v%u (flags=0x%x)\n",
 		   cp->version, cp->flags);
 
-	/* TODO Phase 3: seed ukrandom with cp->entropy[32] */
-	/* TODO Phase 3: store network config for LWIP init */
-	/* TODO Phase 4: check COMM_FLAG_RESUMED for snapshot resume */
+	/* Entropy: consumed by drivers/ukrandom/cloddy/init.c which registers a
+	 * ukrandom driver earlier than the LCPU fallback.
+	 */
+
+	/* lwIP netif config:
+	 *   - Cold boot: `netdev.ip=` boot arg (libparam -> uknetdev einfo -> lib-lwip).
+	 *     We don't intercept here because lib-lwip is an external, per-build-fetched
+	 *     library (under kernels/<name>/.unikraft/libs/lwip/init.c) and patching
+	 *     it would require a fork.
+	 *   - Resume:    userspace SDK reconfigures the netif via the cloddy
+	 *                export table (the export-table function handles
+	 *                thread-context safety internally).
+	 */
+
+	if (cp->flags & COMM_FLAG_RESUMED) {
+		uk_pr_info("cloddy: guest resumed from snapshot\n");
+		/* Userspace re-reads the comm page on application startup
+		 * (sdk/python/src/cloddy/_commpage.py).
+		 */
+	}
+
+	_cloddy_populate_export_table();
 }
 #endif /* CONFIG_KVM_VMM_CLODDY */
 
