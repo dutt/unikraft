@@ -1,4 +1,13 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
+/*
+ * Cloddy ukrandom driver — seeds the kernel CSPRNG from the comm page
+ * at GPA 0x9000. The comm page is the source of truth: the VMM writes
+ * fresh entropy to it on every snapshot restore, so uk_random_reseed()
+ * (triggered by the SDK on resume via the export table, or by the
+ * periodic reseed thread if enabled) naturally picks up fresh bytes.
+ * No local cache — a scrubbed cache would make reseed fail and silently
+ * leave userspace with stale CSPRNG state.
+ */
 #include <errno.h>
 #include <stdbool.h>
 #include <string.h>
@@ -9,23 +18,19 @@
 
 #include <kvm/comm_page.h>
 
-/* Driver-local state, populated once at early-tab entry time.
- * Scrubbed after the first seed_bytes_fb call so entropy doesn't linger. */
-static __u8 cloddy_entropy[32];
-static bool cloddy_entropy_valid;
-
 static int cloddy_seed_bytes_fb(__u8 *buf, __sz len)
 {
-	if (!cloddy_entropy_valid || len > sizeof(cloddy_entropy))
+	volatile struct comm_page_header *cp =
+		(volatile struct comm_page_header *)COMM_PAGE_GPA;
+
+	/* Re-validate on every call — cheap and handles the case where the
+	 * comm page got corrupted between init and a reseed. */
+	if (*(volatile __u64 *)cp->magic != COMM_PAGE_MAGIC_LE64)
+		return -ENODEV;
+	if (len > sizeof(cp->entropy))
 		return -ENODEV;
 
-	memcpy(buf, cloddy_entropy, len);
-	/* First consumer wins — scrub so a second call (or a bug) can't
-	 * deliver stale bytes. Subsequent uk_random_reseed() calls will see
-	 * -ENODEV and the upper layer falls back to whatever the fallback
-	 * driver provides, or degrades deterministically. */
-	memset(cloddy_entropy, 0, sizeof(cloddy_entropy));
-	cloddy_entropy_valid = false;
+	memcpy(buf, (const void *)cp->entropy, len);
 	return 0;
 }
 
@@ -50,7 +55,7 @@ static int uk_random_cloddy_init(struct ukplat_bootinfo __unused *bi)
 	 * to register the fallback. */
 	if (*(volatile __u64 *)cp->magic != COMM_PAGE_MAGIC_LE64)
 		return 0;
-	/* The fields we read below (entropy[]) exist from comm page v1 onward.
+	/* The fields we read (entropy[]) exist from comm page v1 onward.
 	 * Newer versions can append fields after mailbox_len without invalidating
 	 * this driver (comm_page.h documents append-only forward-compat), so we
 	 * only need to reject v0 / zero-initialised headers whose magic somehow
@@ -58,10 +63,7 @@ static int uk_random_cloddy_init(struct ukplat_bootinfo __unused *bi)
 	if (cp->version < 1)
 		return 0;
 
-	memcpy(cloddy_entropy, (const void *)cp->entropy, sizeof(cloddy_entropy));
-	cloddy_entropy_valid = true;
-
-	uk_pr_info("cloddy ukrandom: seeded from comm page (32 bytes)\n");
+	uk_pr_info("cloddy ukrandom: seeding from comm page\n");
 	return uk_random_init(&cloddy_driver);
 }
 
