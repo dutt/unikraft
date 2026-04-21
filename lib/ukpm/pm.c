@@ -109,6 +109,7 @@ __noreturn __isr void uk_pm_sysrestart(void)
 }
 
 UK_EVENT(UK_PM_EVENT_SYSSUSPEND);
+UK_EVENT(UK_PM_EVENT_RESUMED);
 
 __isr int uk_pm_syssuspend(void)
 {
@@ -127,7 +128,14 @@ __isr int uk_pm_syssuspend(void)
 		_uk_pm_syshalt_fallback();
 	}
 
-	return pm_ops->syssuspend();
+	rc = pm_ops->syssuspend();
+	if (rc == 0) {
+		int ev = uk_raise_event(UK_PM_EVENT_RESUMED, __NULL);
+		if (unlikely(ev < 0))
+			uk_pr_err("Resume event raise failed: %d\n", ev);
+		UK_ASSERT(ev != UK_EVENT_HANDLED);
+	}
+	return rc;
 }
 
 UK_EVENT(UK_PM_EVENT_SYSCRASH);

@@ -10,4 +10,8 @@ LIBVIRTIO_NET_CINCLUDES-y  += -I$(UK_DRIV_LIBVIRTIO_BASE)/include
 # TODO Remove as soon as plat dependencies go away
 LIBVIRTIO_NET_CINCLUDES-y  += -I$(UK_PLAT_COMMON_BASE)/include
 
+# cloddy-specific: the UK_PM_EVENT_RESUMED MAC-refresh handler needs
+# access to kvm/comm_page.h to read the resume flag.
+LIBVIRTIO_NET_CINCLUDES-$(CONFIG_KVM_VMM_CLODDY) += -I$(LIBKVMPLAT_BASE)/include
+
 LIBVIRTIO_NET_SRCS-y += $(LIBVIRTIO_NET_BASE)/virtio_net.c

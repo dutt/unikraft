@@ -13,8 +13,11 @@
 #include <string.h>
 #include <uk/plat/common/bootinfo.h>
 #include <uk/print.h>
+#include <uk/random.h>
 #include <uk/random/driver.h>
 #include <uk/boot/earlytab.h>
+#include <uk/event.h>
+#include <uk/pm.h>
 
 #include <kvm/comm_page.h>
 
@@ -81,3 +84,18 @@ static int uk_random_cloddy_init(struct ukplat_bootinfo __unused *bi)
  * DTB_SEED, so no other entry sits at prio 3 and there's no ordering ambiguity. */
 UK_BOOT_EARLYTAB_ENTRY(uk_random_cloddy_init,
 		       UK_PRIO_BEFORE(UK_RANDOM_EARLY_DRIVER_PRIO));
+
+/* Resume handler: re-key ChaCha20 from the fresh entropy the VMM
+ * wrote into the comm page before resume. Short-circuits when
+ * COMM_FLAG_RESUMED is unset (ladder-continue case: the VMM left the
+ * comm page untouched). */
+static int cloddy_reseed_on_resume(void *data __unused)
+{
+	volatile struct comm_page_header *cp =
+		(volatile struct comm_page_header *)COMM_PAGE_GPA;
+	if (!(cp->flags & COMM_FLAG_RESUMED))
+		return UK_EVENT_NOT_HANDLED;
+	uk_random_reseed();
+	return UK_EVENT_NOT_HANDLED;
+}
+UK_EVENT_HANDLER_PRIO(UK_PM_EVENT_RESUMED, cloddy_reseed_on_resume, 0);

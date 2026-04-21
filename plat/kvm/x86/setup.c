@@ -131,9 +131,14 @@ static inline void _check_ospke(void)
 #if CONFIG_KVM_VMM_CLODDY
 #include <kvm/comm_page.h>
 
-/* Defined in plat/kvm/x86/cloddy.c. See cloddy.c for the lwIP integration. */
+/* Defined in plat/kvm/x86/cloddy.c. The first two are also kept wired up
+ * to the UK_PM_EVENT_RESUMED handlers for snapshot_here()-based resumes;
+ * the exports remain available for legacy serial-marker snapshot paths
+ * where the kernel event does not fire.
+ */
 extern int uk_cloddy_reconfig_network(__u32 addr, __u32 netmask, __u32 gateway);
 extern int uk_cloddy_reseed_csprng(void);
+extern int uk_cloddy_snapshot_here(const char *label);
 
 static void _cloddy_populate_export_table(void)
 {
@@ -141,12 +146,14 @@ static void _cloddy_populate_export_table(void)
 	int i = 0;
 	t[i++] = CLODDY_EXPORT_MAGIC;
 	t[i++] = CLODDY_EXPORT_VERSION;
-	t[i++] = 2;  /* count */
+	t[i++] = 3;  /* count */
 	t[i++] = CLODDY_EXPORT_ID_RECONFIG_NETWORK;
 	t[i++] = (__u64)(unsigned long)&uk_cloddy_reconfig_network;
 	t[i++] = CLODDY_EXPORT_ID_RESEED_CSPRNG;
 	t[i++] = (__u64)(unsigned long)&uk_cloddy_reseed_csprng;
-	uk_pr_info("cloddy: export table populated (2 entries)\n");
+	t[i++] = CLODDY_EXPORT_ID_SNAPSHOT_HERE;
+	t[i++] = (__u64)(unsigned long)&uk_cloddy_snapshot_here;
+	uk_pr_info("cloddy: export table populated (3 entries)\n");
 }
 
 static void _comm_page_init(void)

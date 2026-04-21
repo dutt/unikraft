@@ -5,17 +5,30 @@
  */
 
 #include <errno.h>
+#include <string.h>
 #include <uk/arch/types.h>
 #include <uk/arch/util.h>
 #include <uk/boot/earlytab.h>
+#include <uk/init.h>
+#include <uk/libparam.h>
 #include <uk/pm.h>
 #include <uk/prio.h>
+#include <uk/print.h>
 
-/* PIO exit port — must match cloddy-vmm's device/exit_port.rs PORT constant.
- * Same port as QEMU's isa-debug-exit, but we write the raw exit code
- * instead of QEMU's shifted convention.
+#include <kvm/comm_page.h>
+
+/* PIO exit port — must match cloddy-vmm's device/cloddy_ports.rs
+ * EXIT_PORT constant. Same port as QEMU's isa-debug-exit, but we write
+ * the raw exit code instead of QEMU's shifted convention.
  */
 #define CLODDY_EXIT_PORT	0x501
+
+/* PIO snapshot port — must match cloddy-vmm's SNAPSHOT_PORT constant.
+ * Guest writes on entry to uk_pm_syssuspend() so the VMM can consult its
+ * snapshot directive and (optionally) capture a snapshot. The VMM
+ * resumes the vCPU; the halt below then returns.
+ */
+#define CLODDY_SNAPSHOT_PORT	0x502
 
 /* Crash sentinel — must match cloddy-vmm's CRASH_CODE constant.
  * Distinct from any valid POSIX exit code (0-255).
@@ -43,9 +56,20 @@ __isr static int cloddy_crash(void)
 	return -EIO;
 }
 
+static int cloddy_syssuspend(void)
+{
+	/* Port-out causes a VMEXIT; the VMM resumes us by re-entering the
+	 * vCPU, at which point `return 0` runs and uk_pm_syssuspend raises
+	 * UK_PM_EVENT_RESUMED. No HLT needed — KVM_RUN doesn't spin while
+	 * the VMM is handling the exit. */
+	uk_arch_x86_64_outw(CLODDY_SNAPSHOT_PORT, 0);
+	return 0;
+}
+
 static const struct uk_pm_ops cloddy_pm_ops = {
 	.syshalt = cloddy_exit,
 	.sysrestart = cloddy_exit,
+	.syssuspend = cloddy_syssuspend,
 	.syscrash = cloddy_crash,
 };
 
@@ -56,13 +80,51 @@ __isr static int cloddy_register_pm_ops(struct ukplat_bootinfo __unused *bi)
 
 UK_BOOT_EARLYTAB_ENTRY(cloddy_register_pm_ops, UK_PRIO_EARLIEST);
 
+/* --- Cooperative snapshot-point primitive -----------------------
+
+   Exposed via the cloddy export table (id SNAPSHOT_HERE). Writes
+   `label` into the comm-page header, then calls uk_pm_syssuspend()
+   which triggers the VMM via CLODDY_SNAPSHOT_PORT. Returns when the
+   VMM resumes the vCPU. See plans/wip/custom-vmm/resume-hooks-design.md
+   for the full "label invariant" contract.
+ */
+
+int uk_cloddy_snapshot_here(const char *label)
+{
+	volatile struct comm_page_header *cp =
+		(volatile struct comm_page_header *)COMM_PAGE_GPA;
+	size_t n = label ? strnlen(label, COMM_PAGE_LABEL_MAX - 1) : 0;
+	size_t i;
+
+	/* Zero first, then copy. Guarantees NUL-termination and clears
+	 * any trailing bytes from a prior label.
+	 */
+	for (i = 0; i < COMM_PAGE_LABEL_MAX; i++)
+		cp->label[i] = 0;
+	for (i = 0; i < n; i++)
+		cp->label[i] = label[i];
+
+	/* Quiesce. Returns when the VMM resumes us. On pass-through the
+	 * VMM zeros cp->label before resuming; on snapshot-taken the VMM
+	 * leaves (or sets) the label.
+	 */
+	return uk_pm_syssuspend();
+}
+
 /* --- Kernel CSPRNG reseed ---------------------------------------
 
-   Exposed via the cloddy export table. SDK calls this on snapshot
-   resume so uk_random_reseed() re-keys ChaCha20 from the comm page
-   (the cloddy ukrandom driver reads GPA 0x9000 on every seed call).
-   Without this, os.urandom / getrandom(2) / TLS nonces keep running
-   the snapshot-frozen CSPRNG state across N resumed VMs — bad.
+   Exposed via the cloddy export table (id RESEED_CSPRNG). SDKs call
+   this on snapshot resume so uk_random_reseed() re-keys ChaCha20 from
+   the comm page (the cloddy ukrandom driver reads GPA 0x9000 on every
+   seed call). Without this, os.urandom / getrandom(2) / TLS nonces
+   keep running the snapshot-frozen CSPRNG state across N resumed VMs
+   — bad.
+
+   For snapshot_here()-based resumes the kernel's UK_PM_EVENT_RESUMED
+   handler in drivers/ukrandom/cloddy/init.c runs this automatically;
+   this export remains available for legacy serial-marker snapshot
+   paths where the kernel event does not fire (the VMM captures the VM
+   outside uk_pm_syssuspend).
 */
 
 #include <uk/random.h>
@@ -71,6 +133,36 @@ int uk_cloddy_reseed_csprng(void)
 {
 	return uk_random_reseed();
 }
+
+/* --- Pre-main snapshot hook ------------------------------------
+
+   Gated by the boot arg `cloddy.snapshot_here=1`. Fires in the late
+   init class, after all other kernel init is done but before the main
+   thread runs. The hook calls snapshot_here("premain"); the VMM
+   (matching its directive) will typically snapshot + exit here.
+*/
+
+static char *cloddy_snapshot_here_arg;
+UK_LIBPARAM_PARAM_ALIAS(snapshot_here, &cloddy_snapshot_here_arg, charp,
+	"Call snapshot_here(\"premain\") from the premain hook when =1");
+
+static int cloddy_premain_init(struct uk_init_ctx *ctx __unused)
+{
+	if (!cloddy_snapshot_here_arg || cloddy_snapshot_here_arg[0] != '1')
+		return 0;
+	uk_pr_info("cloddy: snapshot_here(\"premain\") from premain hook\n");
+	uk_cloddy_snapshot_here("premain");
+	return 0;  /* do NOT abort boot on resume */
+}
+
+/* Signature: (init_fn, term_fn, prio). 0x0 term_fn = no cleanup; the
+ * macro token-pastes its args so a real NULL doesn't work here — match
+ * existing callers (e.g. lib/posix-process/process.c:
+ * uk_late_initcall(posix_process_init, 0x0)).
+ * UK_PRIO_LATEST places us after other late-class entries but still
+ * within the uk_inittab iteration before the main thread is unblocked.
+ */
+uk_late_initcall_prio(cloddy_premain_init, 0x0, UK_PRIO_LATEST);
 
 /* --- Resume-time netif reconfig --------------------------------- */
 
@@ -157,6 +249,29 @@ int uk_cloddy_reconfig_network(__u32 addr, __u32 netmask, __u32 gateway)
 		return -EAGAIN;
 	return args.rc;
 }
+
+#include <uk/event.h>
+
+/* Resume handler: re-apply the post-resume netif config the VMM wrote
+ * into the comm page. Short-circuits on ladder-continue
+ * (COMM_FLAG_RESUMED unset) — the VMM didn't touch the comm page.
+ * Priority 5 so it runs *after* the virtio-net MAC refresh at prio 4
+ * (lib-order is low-to-high), letting lwIP's netif_set_addr consult
+ * the already-refreshed hwaddr. */
+static int cloddy_netif_on_resume(void *data __unused)
+{
+	volatile struct comm_page_header *cp =
+		(volatile struct comm_page_header *)COMM_PAGE_GPA;
+	if (*(volatile __u64 *)cp->magic != COMM_PAGE_MAGIC_LE64)
+		return UK_EVENT_NOT_HANDLED;
+	if (!(cp->flags & COMM_FLAG_RESUMED))
+		return UK_EVENT_NOT_HANDLED;
+	uk_cloddy_reconfig_network(lwip_ntohl(cp->ipv4_addr),
+				   lwip_ntohl(cp->ipv4_netmask),
+				   lwip_ntohl(cp->ipv4_gateway));
+	return UK_EVENT_NOT_HANDLED;
+}
+UK_EVENT_HANDLER_PRIO(UK_PM_EVENT_RESUMED, cloddy_netif_on_resume, 5);
 
 #else  /* !CONFIG_LIBLWIP */
 
