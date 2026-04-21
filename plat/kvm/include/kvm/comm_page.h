@@ -50,7 +50,14 @@ struct comm_page_header {
 	__u8     _pad1[2];        /* 0x042: alignment padding               */
 	__u32    dns_addr;        /* 0x044: IPv4, network byte order        */
 	__u32    mailbox_len;     /* 0x048: 0 = no mailbox                  */
-} __packed;
+	/* Bidirectional snapshot label. Guest writes before
+	 * uk_pm_syssuspend(); VMM writes (or zeros) on resume. See
+	 * plans/wip/custom-vmm/resume-hooks-design.md "The label field and
+	 * its invariant" for the full contract. */
+	char     label[64];       /* 0x04C: NUL-terminated snapshot name    */
+} __packed;                   /* header ends at 0x08C                    */
+
+#define COMM_PAGE_LABEL_MAX     64
 
 /* Mailbox area (page 2, at COMM_PAGE_GPA + 0x1000) */
 #define COMM_PAGE_MAILBOX_OFFSET  0x1000
@@ -83,13 +90,29 @@ struct comm_page_header {
  * Arguments: host-order IPv4 u32s. Implementation calls lwip_htonl()
  * internally before invoking lwIP's ip4_addr_set_u32.
  * Returns 0 on success; -ENODEV if no primary netif; -EAGAIN if the
- * tcpip-thread callback couldn't be queued or didn't complete in time. */
+ * tcpip-thread callback couldn't be queued or didn't complete in time.
+ *
+ * Also invoked internally by the UK_PM_EVENT_RESUMED handler in cloddy.c
+ * for snapshots taken via snapshot_here(). This export remains available
+ * for legacy serial-marker snapshot paths where the kernel resume event
+ * does not fire (the VMM captures the VM outside uk_pm_syssuspend). */
 
 #define CLODDY_EXPORT_ID_RESEED_CSPRNG  2
 /* Signature: int(void)
  * Refreshes the kernel CSPRNG (ChaCha20) state by invoking
  * uk_random_reseed(), which re-reads entropy from the comm page.
  * Returns 0 on success, or a negative errno from uk_random_reseed().
+ *
+ * Duplicates the UK_PM_EVENT_RESUMED reseed handler in
+ * drivers/ukrandom/cloddy/init.c for legacy serial-marker snapshot
+ * paths; see CLODDY_EXPORT_ID_RECONFIG_NETWORK comment. */
+
+#define CLODDY_EXPORT_ID_SNAPSHOT_HERE  3
+/* Signature: int(const char *label)
+ * Cooperative snapshot point. Copies up to COMM_PAGE_LABEL_MAX-1 bytes
+ * of `label` into comm_page_header.label, then quiesces the guest via
+ * uk_pm_syssuspend(). Returns 0 when the VMM resumes the vCPU
+ * (pass-through or snapshot-then-continue), <0 on errors.
  */
 
 #endif /* __KVM_COMM_PAGE_H__ */

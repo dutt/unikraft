@@ -138,6 +138,12 @@ int uk_pm_get_exit_code(void);
 #define UK_PM_EVENT_SYSSUSPEND			uk_pm_event_syssuspend
 #define UK_PM_EVENT_SYSCRASH			uk_pm_event_syscrash
 
+/* Raised after pm_ops->syssuspend() returns successfully — i.e. the
+ * guest has been resumed. Subscribers run post-resume reconfiguration
+ * work (e.g. reseed CSPRNG, reconfigure netif, refresh virtio MAC).
+ */
+#define UK_PM_EVENT_RESUMED			uk_pm_event_resumed
+
 #define UK_PM_EVENT_SHUTDOWN_REQ		uk_pm_event_shutdown_req
 
 /**

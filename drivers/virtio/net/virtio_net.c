@@ -42,6 +42,12 @@
 #include <virtio/virtqueue.h>
 #include <virtio/virtio_net.h>
 
+#if CONFIG_KVM_VMM_CLODDY
+#include <uk/event.h>
+#include <uk/pm.h>
+#include <kvm/comm_page.h>
+#endif
+
 #define DRIVER_NAME	"virtio-net"
 
 /* VIRTIO_PKT_BUFFER_LEN = VIRTIO_NET_HDR + ETH_HDR + ETH_PKT_PAYLOAD_LEN */
@@ -1415,6 +1421,46 @@ static const struct uk_netdev_ops virtio_netdev_ops = {
 	.rxq_info_get = virtio_netdev_rxq_info_get,
 };
 
+#if CONFIG_KVM_VMM_CLODDY
+/* Stashed at device-probe time so the resume handler can find the single
+ * NIC without walking the virtio bus. Cloddy guests have exactly one
+ * virtio-net NIC by design (cloddy-vmm's device set), so a static
+ * pointer suffices. If/when multi-NIC support arrives this becomes a
+ * list walk. */
+static struct virtio_net_device *cloddy_primary_vndev;
+
+/* Re-read the MAC from device config space into the driver's cached
+ * hw_addr. On production resume the VMM has already updated config
+ * space with the new MAC; we just pick it up. Same read as initial
+ * negotiation (see virtio_netdev_feature_negotiate around line 1142). */
+static void virtio_net_refresh_mac(struct virtio_net_device *vndev)
+{
+	virtio_config_get(vndev->vdev,
+			  __offsetof(struct virtio_net_config, mac),
+			  &vndev->hw_addr.addr_bytes[0],
+			  UK_NETDEV_HWADDR_LEN, 1);
+	/* lwIP picks up the refreshed hwaddr when the netif handler
+	 * (plat/kvm/x86/cloddy.c:cloddy_netif_on_resume, prio 5) runs
+	 * netif_set_addr, which re-consults the uknetdev driver. No
+	 * separate propagation needed here. */
+}
+
+/* Resume handler: runs at prio 4 so it executes *before* the lwIP
+ * netif handler at prio 5 (lib-order is low-to-high), guaranteeing
+ * netif_set_addr sees the refreshed hwaddr. */
+static int virtio_net_mac_on_resume(void *data __unused)
+{
+	volatile struct comm_page_header *cp =
+		(volatile struct comm_page_header *)COMM_PAGE_GPA;
+	if (!(cp->flags & COMM_FLAG_RESUMED))
+		return UK_EVENT_NOT_HANDLED;
+	if (cloddy_primary_vndev)
+		virtio_net_refresh_mac(cloddy_primary_vndev);
+	return UK_EVENT_NOT_HANDLED;
+}
+UK_EVENT_HANDLER_PRIO(UK_PM_EVENT_RESUMED, virtio_net_mac_on_resume, 4);
+#endif /* CONFIG_KVM_VMM_CLODDY */
+
 static int virtio_net_add_dev(struct virtio_dev *vdev)
 {
 	struct virtio_net_device *vndev;
@@ -1448,6 +1494,11 @@ static int virtio_net_add_dev(struct virtio_dev *vdev)
 	 */
 	vndev->max_vqueue_pairs = 1;
 	uk_pr_debug("virtio-net device registered with libuknet\n");
+
+#if CONFIG_KVM_VMM_CLODDY
+	if (!cloddy_primary_vndev)
+		cloddy_primary_vndev = vndev;
+#endif
 
 exit:
 	return rc;
