@@ -167,6 +167,7 @@ uk_late_initcall_prio(cloddy_premain_init, 0x0, UK_PRIO_LATEST);
 /* --- Resume-time netif reconfig --------------------------------- */
 
 #if CONFIG_LIBLWIP
+#include <lwip/etharp.h>
 #include <lwip/ip4_addr.h>
 #include <lwip/netif.h>
 #include <lwip/sys.h>
@@ -212,7 +213,40 @@ static void cloddy_reconfig_cb(void *arg)
 		ip4_addr_set_u32(&ip, lwip_htonl(a->addr));
 		ip4_addr_set_u32(&nm, lwip_htonl(a->netmask));
 		ip4_addr_set_u32(&gw, lwip_htonl(a->gateway));
+
+		/* Refresh the netif's hwaddr from the comm page. The VMM writes
+		 * the post-resume MAC at cp->mac (see control-plane/.../comm_page.rs);
+		 * virtio_net_mac_on_resume (prio 4) already copied that into the
+		 * driver's hwaddr cache, but lwIP caches its own copy on nif->hwaddr
+		 * which netif_set_addr does not touch. Without this update the
+		 * restored guest keeps the snapshot-time MAC on the wire while the
+		 * host/bridge expect the fresh per-VM MAC — ARP/TCP traffic falls
+		 * on the floor. Doing it here (on the tcpip thread) is race-safe
+		 * with any concurrent lwIP netif access. */
+		volatile struct comm_page_header *cp =
+			(volatile struct comm_page_header *)COMM_PAGE_GPA;
+		__u8 new_mac[6];
+		unsigned int i;
+		int mac_changed = 0;
+		for (i = 0; i < 6; i++) {
+			new_mac[i] = cp->mac[i];
+			if (new_mac[i] != nif->hwaddr[i])
+				mac_changed = 1;
+		}
+		if (mac_changed) {
+			for (i = 0; i < 6; i++)
+				nif->hwaddr[i] = new_mac[i];
+		}
+
 		netif_set_addr(nif, &ip, &nm, &gw);
+
+		/* Emit a gratuitous ARP so the host bridge fdb and any peers
+		 * that cached `(old_ip -> old_mac)` or `(new_ip -> old_mac)`
+		 * see the fresh mapping immediately. Without this the first
+		 * host→guest connect after resume fails until the bridge
+		 * relearns from our own outbound traffic, which can be many
+		 * seconds on an idle guest. */
+		etharp_gratuitous(nif);
 		a->rc = 0;
 	}
 	sys_sem_signal(&a->done);

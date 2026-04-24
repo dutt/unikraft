@@ -119,9 +119,20 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 	/* TODO: Make sure sigaltstack() does not modify the altstack state
 	 * while we are executing on it, neither sigaction() modifies
 	 * sa_flags->SA_ONSTACK.
+	 *
+	 * POSIX-compliant fallback: if SA_ONSTACK is set but no alternate
+	 * stack has been configured (ss_sp == NULL), fall through to the
+	 * regular application stack. Linux does the same — it's a silent
+	 * fallback, not an error. Previously this path `UK_ASSERT`ed on
+	 * `ss_sp`, which kernel-panicked any guest runtime that installs a
+	 * SIGSEGV/SIGBUS/SIGFPE handler with SA_ONSTACK but doesn't (or
+	 * didn't yet) call sigaltstack() — e.g. Rust musl-static binaries,
+	 * which install the handler as part of stack-overflow detection but
+	 * whose sigaltstack configuration is fragile.
 	 */
-	if ((ks->ks_flags & SA_ONSTACK) && !(altstack->ss_flags & SS_DISABLE)) {
-		UK_ASSERT(altstack->ss_sp);
+	if ((ks->ks_flags & SA_ONSTACK) &&
+	    !(altstack->ss_flags & SS_DISABLE) &&
+	    altstack->ss_sp) {
 		UK_ASSERT(!(altstack->ss_flags & SS_ONSTACK));
 
 		altstack->ss_flags |= SS_ONSTACK;
@@ -131,6 +142,18 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 
 		ulsp = ukarch_gen_sp(altstack->ss_sp, altstack->ss_size);
 	} else {
+		/* Warn once if SA_ONSTACK was requested but no altstack is
+		 * configured — preserves the original assertion's diagnostic
+		 * value without kernel-panicking. */
+		if ((ks->ks_flags & SA_ONSTACK) && !altstack->ss_sp) {
+			static int warned;
+			if (!warned) {
+				uk_pr_warn("SA_ONSTACK set but altstack not configured (ss_sp=NULL); "
+					   "falling back to application stack for signal %d\n",
+					   sig->siginfo.si_signo);
+				warned = 1;
+			}
+		}
 		ulsp = ALIGN_DOWN(uk_lcpu_regs_get(execenv->regs, SP),
 				  UKARCH_SP_ALIGN);
 		uk_pr_debug("Using the application stack @ 0x%lx\n", ulsp);
@@ -154,8 +177,13 @@ static void handle_self(struct uk_signal *sig, const struct kern_sigaction *ks,
 		pprocess_signal_jmp_handler(&handler_ctx, execenv);
 	}
 
-	if (ks->ks_flags & SA_ONSTACK) {
-		UK_ASSERT(altstack->ss_flags & SS_ONSTACK);
+	/* Only clear SS_ONSTACK if we actually entered the altstack path
+	 * above. The new `altstack->ss_sp` check in the if-predicate means
+	 * we may have skipped it when SA_ONSTACK was requested but no
+	 * altstack was configured; in that case SS_ONSTACK is not set and
+	 * there's nothing to tear down.
+	 */
+	if ((ks->ks_flags & SA_ONSTACK) && (altstack->ss_flags & SS_ONSTACK)) {
 		UK_ASSERT(!(altstack->ss_flags & SS_DISABLE));
 		altstack->ss_flags &= ~SS_ONSTACK;
 	}
