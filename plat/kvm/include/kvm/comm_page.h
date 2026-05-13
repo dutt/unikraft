@@ -85,27 +85,11 @@ struct comm_page_header {
 #define CLODDY_EXPORT_MAGIC          0xC10DDEADEB10A81EULL
 #define CLODDY_EXPORT_VERSION        1
 
-#define CLODDY_EXPORT_ID_RECONFIG_NETWORK  1
-/* Signature: int(__u32 addr, __u32 netmask, __u32 gateway)
- * Arguments: host-order IPv4 u32s. Implementation calls lwip_htonl()
- * internally before invoking lwIP's ip4_addr_set_u32.
- * Returns 0 on success; -ENODEV if no primary netif; -EAGAIN if the
- * tcpip-thread callback couldn't be queued or didn't complete in time.
- *
- * Also invoked internally by the UK_PM_EVENT_RESUMED handler in cloddy.c
- * for snapshots taken via snapshot_here(). This export remains available
- * for legacy serial-marker snapshot paths where the kernel resume event
- * does not fire (the VMM captures the VM outside uk_pm_syssuspend). */
-
-#define CLODDY_EXPORT_ID_RESEED_CSPRNG  2
-/* Signature: int(void)
- * Refreshes the kernel CSPRNG (ChaCha20) state by invoking
- * uk_random_reseed(), which re-reads entropy from the comm page.
- * Returns 0 on success, or a negative errno from uk_random_reseed().
- *
- * Duplicates the UK_PM_EVENT_RESUMED reseed handler in
- * drivers/ukrandom/cloddy/init.c for legacy serial-marker snapshot
- * paths; see CLODDY_EXPORT_ID_RECONFIG_NETWORK comment. */
+/* IDs 1 (RECONFIG_NETWORK) and 2 (RESEED_CSPRNG) were removed: both are
+ * now handled in-kernel by UK_PM_EVENT_RESUMED handlers (lwIP netif
+ * reconfig in plat/kvm/x86/cloddy.c, CSPRNG reseed in
+ * drivers/ukrandom/cloddy/init.c). The IDs are not reused so existing
+ * SDK code that probes for them just gets a "not found" lookup. */
 
 #define CLODDY_EXPORT_ID_SNAPSHOT_HERE  3
 /* Signature: int(const char *label)

@@ -111,28 +111,17 @@ int uk_cloddy_snapshot_here(const char *label)
 	return uk_pm_syssuspend();
 }
 
-/* --- Kernel CSPRNG reseed ---------------------------------------
+/* --- Kernel CSPRNG reseed (handled in-kernel) ---------------------
 
-   Exposed via the cloddy export table (id RESEED_CSPRNG). SDKs call
-   this on snapshot resume so uk_random_reseed() re-keys ChaCha20 from
-   the comm page (the cloddy ukrandom driver reads GPA 0x9000 on every
-   seed call). Without this, os.urandom / getrandom(2) / TLS nonces
-   keep running the snapshot-frozen CSPRNG state across N resumed VMs
-   — bad.
+   The kernel's UK_PM_EVENT_RESUMED handler in
+   drivers/ukrandom/cloddy/init.c re-keys ChaCha20 from the comm page
+   on every resume. Without this, os.urandom / getrandom(2) / TLS
+   nonces would keep running the snapshot-frozen CSPRNG state across N
+   resumed VMs — bad.
 
-   For snapshot_here()-based resumes the kernel's UK_PM_EVENT_RESUMED
-   handler in drivers/ukrandom/cloddy/init.c runs this automatically;
-   this export remains available for legacy serial-marker snapshot
-   paths where the kernel event does not fire (the VMM captures the VM
-   outside uk_pm_syssuspend).
+   The previous comm-page export `uk_cloddy_reseed_csprng` was removed
+   once the kernel event handler covered all snapshot paths.
 */
-
-#include <uk/random.h>
-
-int uk_cloddy_reseed_csprng(void)
-{
-	return uk_random_reseed();
-}
 
 /* --- Pre-main snapshot hook ------------------------------------
 
@@ -175,12 +164,12 @@ uk_late_initcall_prio(cloddy_premain_init, 0x0, UK_PRIO_LATEST);
 
 /* lwIP 2.1.x's netif mutation APIs (netif_set_addr) are only safe to call
  * from the tcpip thread, or while holding LWIP_TCPIP_CORE_LOCKING (not
- * enabled in our build). The userspace SDK invokes uk_cloddy_reconfig_network
- * from whichever thread it happens to be on -- that's not the tcpip thread.
- * We use tcpip_callback() to post a callback onto the tcpip thread, and a
- * sys_sem_t to block the caller until the callback runs and reports its
- * result. This is lwIP's documented pattern for host-thread to tcpip-thread
- * work.
+ * enabled in our build). cloddy_netif_on_resume invokes
+ * cloddy_reconfig_network from the UK_PM_EVENT_RESUMED dispatch context
+ * -- that's not the tcpip thread. We use tcpip_callback() to post a
+ * callback onto the tcpip thread, and a sys_sem_t to block the caller
+ * until the callback runs and reports its result. This is lwIP's
+ * documented pattern for host-thread to tcpip-thread work.
  *
  * tcpip_callback is upstream lwIP 2.1.x (declared in lwip/tcpip.h),
  * available because CONFIG_LWIP_THREADS: 'y' in both Kraftfiles starts the
@@ -252,7 +241,8 @@ static void cloddy_reconfig_cb(void *arg)
 	sys_sem_signal(&a->done);
 }
 
-/* Called from the SDK via the cloddy export table on snapshot resume.
+/* Called from cloddy_netif_on_resume (UK_PM_EVENT_RESUMED handler) to
+ * reapply post-resume netif config the VMM wrote into the comm page.
  * Blocks (bounded) until the tcpip thread has applied the new config.
  * Returns 0 on success, -ENODEV if no primary netif, -EAGAIN if the
  * callback couldn't be queued or the tcpip thread didn't run the
@@ -261,7 +251,7 @@ static void cloddy_reconfig_cb(void *arg)
  * Arguments are host-order u32s (see cloddy_reconfig_cb byte-order note). */
 #define CLODDY_RECONFIG_TIMEOUT_MS 2000
 
-int uk_cloddy_reconfig_network(__u32 addr, __u32 netmask, __u32 gateway)
+static int cloddy_reconfig_network(__u32 addr, __u32 netmask, __u32 gateway)
 {
 	struct cloddy_reconfig_args args = {
 		.addr = addr, .netmask = netmask, .gateway = gateway, .rc = 0,
@@ -300,21 +290,20 @@ static int cloddy_netif_on_resume(void *data __unused)
 		return UK_EVENT_NOT_HANDLED;
 	if (!(cp->flags & COMM_FLAG_RESUMED))
 		return UK_EVENT_NOT_HANDLED;
-	uk_cloddy_reconfig_network(lwip_ntohl(cp->ipv4_addr),
-				   lwip_ntohl(cp->ipv4_netmask),
-				   lwip_ntohl(cp->ipv4_gateway));
+	cloddy_reconfig_network(lwip_ntohl(cp->ipv4_addr),
+				lwip_ntohl(cp->ipv4_netmask),
+				lwip_ntohl(cp->ipv4_gateway));
 	return UK_EVENT_NOT_HANDLED;
 }
 UK_EVENT_HANDLER_PRIO(UK_PM_EVENT_RESUMED, cloddy_netif_on_resume, 5);
 
 #else  /* !CONFIG_LIBLWIP */
 
-/* No lwIP linked -- the export-table entry still exists so SDKs can call
- * unconditionally, but reconfig is not possible. SDK should treat -ENODEV
- * as "no netif to reconfigure" and fall back to whatever cold-boot config
- * was provided. */
-int uk_cloddy_reconfig_network(__u32 addr __unused, __u32 netmask __unused,
-			       __u32 gateway __unused)
+/* No lwIP linked -- stub form for builds without lwIP. Kept so the
+ * resume-time caller (cloddy_netif_on_resume) can compile in either
+ * configuration; the no-lwIP build path simply has no netif to update. */
+static int cloddy_reconfig_network(__u32 addr __unused, __u32 netmask __unused,
+				   __u32 gateway __unused)
 {
 	return -ENODEV;
 }

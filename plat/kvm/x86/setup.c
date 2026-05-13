@@ -119,8 +119,10 @@ static inline void _check_ospke(void)
  *     registered before the LCPU fallback).
  *   - Cold-boot netif config: lib-lwip via the netdev.ip= boot arg
  *     (libparam -> uknetdev einfo).
- *   - Resume-time netif reconfig: userspace SDKs call into Unikraft via
- *     the cloddy export table.
+ *   - Resume-time netif reconfig: UK_PM_EVENT_RESUMED handler in
+ *     plat/kvm/x86/cloddy.c (cloddy_netif_on_resume).
+ *   - Resume-time CSPRNG reseed: UK_PM_EVENT_RESUMED handler in
+ *     drivers/ukrandom/cloddy/init.c.
  *   - Userspace post-resume work: sdk/python/src/cloddy/_commpage.py
  *     re-reads the comm page on each interpreter startup and after
  *     snapshot resume.
@@ -131,13 +133,7 @@ static inline void _check_ospke(void)
 #if CONFIG_KVM_VMM_CLODDY
 #include <kvm/comm_page.h>
 
-/* Defined in plat/kvm/x86/cloddy.c. The first two are also kept wired up
- * to the UK_PM_EVENT_RESUMED handlers for snapshot_here()-based resumes;
- * the exports remain available for legacy serial-marker snapshot paths
- * where the kernel event does not fire.
- */
-extern int uk_cloddy_reconfig_network(__u32 addr, __u32 netmask, __u32 gateway);
-extern int uk_cloddy_reseed_csprng(void);
+/* Defined in plat/kvm/x86/cloddy.c. */
 extern int uk_cloddy_snapshot_here(const char *label);
 
 static void _cloddy_populate_export_table(void)
@@ -146,14 +142,10 @@ static void _cloddy_populate_export_table(void)
 	int i = 0;
 	t[i++] = CLODDY_EXPORT_MAGIC;
 	t[i++] = CLODDY_EXPORT_VERSION;
-	t[i++] = 3;  /* count */
-	t[i++] = CLODDY_EXPORT_ID_RECONFIG_NETWORK;
-	t[i++] = (__u64)(unsigned long)&uk_cloddy_reconfig_network;
-	t[i++] = CLODDY_EXPORT_ID_RESEED_CSPRNG;
-	t[i++] = (__u64)(unsigned long)&uk_cloddy_reseed_csprng;
+	t[i++] = 1;  /* count */
 	t[i++] = CLODDY_EXPORT_ID_SNAPSHOT_HERE;
 	t[i++] = (__u64)(unsigned long)&uk_cloddy_snapshot_here;
-	uk_pr_info("cloddy: export table populated (3 entries)\n");
+	uk_pr_info("cloddy: export table populated (1 entry)\n");
 }
 
 static void _comm_page_init(void)
@@ -185,9 +177,10 @@ static void _comm_page_init(void)
 	 *     We don't intercept here because lib-lwip is an external, per-build-fetched
 	 *     library (under kernels/<name>/.unikraft/libs/lwip/init.c) and patching
 	 *     it would require a fork.
-	 *   - Resume:    userspace SDK reconfigures the netif via the cloddy
-	 *                export table (the export-table function handles
-	 *                thread-context safety internally).
+	 *   - Resume:    UK_PM_EVENT_RESUMED handler in plat/kvm/x86/cloddy.c
+	 *                (cloddy_netif_on_resume) re-applies the post-resume
+	 *                config the VMM wrote into the comm page; the handler
+	 *                marshals onto the tcpip thread internally.
 	 */
 
 	if (cp->flags & COMM_FLAG_RESUMED) {
