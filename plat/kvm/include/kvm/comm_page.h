@@ -78,8 +78,23 @@ struct comm_page_header {
  *
  * The export-table region (offset 0x100..0xFFF within the comm page) is
  * Unikraft-populated and must NOT be overwritten by the VMM after cold
- * boot. The VMM's comm_page::write only touches offsets 0x000..0x04C
- * (see control-plane/crates/cloddy-vmm/src/comm_page.rs).
+ * boot.
+ *
+ * The window 0x08C..0x100 (between this struct's end at 0x08C and the
+ * export table at 0x100) is VMM-owned scratch, written by the VMM's
+ * comm_page::write / write_snapshot_result at fixed offsets — NOT declared
+ * as fields of this struct (the C kernel never reads them; they are a
+ * host<->guest-userspace channel). It is safe for the kernel to leave this
+ * region alone. Current occupants (offsets owned by
+ * control-plane/crates/cloddy-worker-abi/src/lib.rs, mirrored guest-side in
+ * kernels/python-base/_cloddy_loader.py):
+ *   0x08C  bootstrap_token[32]  (BOOTSTRAP_TOKEN_OFFSET/LEN)
+ *   0x0AC  resume_epoch  u64    (RESUME_EPOCH_OFFSET)   — fork-detection edge
+ *   0x0B4  snapshot_id[16]      (SNAPSHOT_ID_OFFSET)    — OnDemand capture id
+ *   0x0C4  snapshot_result u32  (SNAPSHOT_RESULT_OFFSET)— 0=none/1=ok/2=err/3=quota
+ *   0x0C8  adhoc_request u8     (ADHOC_REQUEST_OFFSET)  — 1=user checkpoint()
+ * These are additive in the previously-reserved window, so they need NO
+ * COMM_PAGE_VERSION bump. See control-plane/crates/cloddy-vmm/src/comm_page.rs.
  */
 #define CLODDY_EXPORT_TABLE_OFFSET   0x100
 #define CLODDY_EXPORT_MAGIC          0xC10DDEADEB10A81EULL
@@ -97,6 +112,19 @@ struct comm_page_header {
  * of `label` into comm_page_header.label, then quiesces the guest via
  * uk_pm_syssuspend(). Returns 0 when the VMM resumes the vCPU
  * (pass-through or snapshot-then-continue), <0 on errors.
+ * Emits `out dx, ax` with ax = 0 (Continue) — the only ThenAction it can
+ * request. Use id 4 to request Exit.
+ */
+
+#define CLODDY_EXPORT_ID_SNAPSHOT_HERE_EX  4
+/* Signature: int(const char *label, uint16_t then)
+ * Extended cooperative snapshot point (flexible-snapshotting Plan 2). Same as
+ * id 3 but emits `out dx, ax` with ax = `then` (the ThenAction: 0 = Continue,
+ * 1 = Exit) instead of a hardcoded 0, so the guest's checkpoint_and_exit() can
+ * request a capture-and-exit. Still routes through uk_pm_syssuspend() so the
+ * UK_PM_EVENT_RESUMED handlers (IP + CSPRNG re-stamp) run on a fork wake.
+ * SDKs that predate this export (or run on a kernel without it) get a
+ * "not found" lookup and must raise a specific "unsupported" error.
  */
 
 #endif /* __KVM_COMM_PAGE_H__ */

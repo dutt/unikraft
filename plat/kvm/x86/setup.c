@@ -135,6 +135,7 @@ static inline void _check_ospke(void)
 
 /* Defined in plat/kvm/x86/cloddy.c. */
 extern int uk_cloddy_snapshot_here(const char *label);
+extern int uk_cloddy_snapshot_here_ex(const char *label, __u16 then);
 
 static void _cloddy_populate_export_table(void)
 {
@@ -142,10 +143,12 @@ static void _cloddy_populate_export_table(void)
 	int i = 0;
 	t[i++] = CLODDY_EXPORT_MAGIC;
 	t[i++] = CLODDY_EXPORT_VERSION;
-	t[i++] = 1;  /* count */
+	t[i++] = 2;  /* count */
 	t[i++] = CLODDY_EXPORT_ID_SNAPSHOT_HERE;
 	t[i++] = (__u64)(unsigned long)&uk_cloddy_snapshot_here;
-	uk_pr_info("cloddy: export table populated (1 entry)\n");
+	t[i++] = CLODDY_EXPORT_ID_SNAPSHOT_HERE_EX;
+	t[i++] = (__u64)(unsigned long)&uk_cloddy_snapshot_here_ex;
+	uk_pr_info("cloddy: export table populated (2 entries)\n");
 }
 
 static void _comm_page_init(void)

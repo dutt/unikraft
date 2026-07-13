@@ -56,13 +56,23 @@ __isr static int cloddy_crash(void)
 	return -EIO;
 }
 
+/* ThenAction (`ax`) for the NEXT syssuspend-triggered snapshot-port write.
+ * id-3 uk_cloddy_snapshot_here leaves it 0 (Continue); id-4
+ * uk_cloddy_snapshot_here_ex sets it just before uk_pm_syssuspend() so
+ * cloddy_syssuspend emits the requested value. Reset to 0 after each use so a
+ * subsequent id-3 call defaults back to Continue. Single-threaded w.r.t. the
+ * SDK-side checkpoint lock that serialises the shared comm-page channel. */
+static __u16 cloddy_next_then;
+
 static int cloddy_syssuspend(void)
 {
 	/* Port-out causes a VMEXIT; the VMM resumes us by re-entering the
 	 * vCPU, at which point `return 0` runs and uk_pm_syssuspend raises
 	 * UK_PM_EVENT_RESUMED. No HLT needed — KVM_RUN doesn't spin while
-	 * the VMM is handling the exit. */
-	uk_arch_x86_64_outw(CLODDY_SNAPSHOT_PORT, 0);
+	 * the VMM is handling the exit. `ax` carries the ThenAction
+	 * (0 = Continue, 1 = Exit); id-3 leaves it 0. */
+	uk_arch_x86_64_outw(CLODDY_SNAPSHOT_PORT, cloddy_next_then);
+	cloddy_next_then = 0;
 	return 0;
 }
 
@@ -108,6 +118,33 @@ int uk_cloddy_snapshot_here(const char *label)
 	 * VMM zeros cp->label before resuming; on snapshot-taken the VMM
 	 * leaves (or sets) the label.
 	 */
+	return uk_pm_syssuspend();
+}
+
+/* --- Extended cooperative snapshot-point (id 4) ------------------
+
+   Exposed via the cloddy export table (id SNAPSHOT_HERE_EX,
+   flexible-snapshotting Plan 2). Identical to uk_cloddy_snapshot_here
+   except the snapshot-port write carries `then` in ax (0 = Continue,
+   1 = Exit) so checkpoint_and_exit() can request a capture-and-exit.
+   Still routes through uk_pm_syssuspend() so UK_PM_EVENT_RESUMED
+   (IP + CSPRNG re-stamp) runs on a fork wake.
+ */
+int uk_cloddy_snapshot_here_ex(const char *label, __u16 then)
+{
+	volatile struct comm_page_header *cp =
+		(volatile struct comm_page_header *)COMM_PAGE_GPA;
+	size_t n = label ? strnlen(label, COMM_PAGE_LABEL_MAX - 1) : 0;
+	size_t i;
+
+	for (i = 0; i < COMM_PAGE_LABEL_MAX; i++)
+		cp->label[i] = 0;
+	for (i = 0; i < n; i++)
+		cp->label[i] = label[i];
+
+	/* cloddy_syssuspend() emits `out 0x502, ax` with this value, then
+	 * resets it to 0 so a later id-3 call defaults back to Continue. */
+	cloddy_next_then = then;
 	return uk_pm_syssuspend();
 }
 
