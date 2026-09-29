@@ -271,11 +271,51 @@ int uk_sys_clock_nanosleep(clockid_t clockid, int flags,
 			   const struct timespec *request,
 			   struct timespec *remain)
 {
-	if ((clockid == CLOCK_REALTIME) && !(flags & TIMER_ABSTIME))
-		return uk_sys_nanosleep(request, remain);
+	struct timespec rel, now;
+	int err;
 
-	UK_WARN_STUBBED();
-	return 0;
+	if (!request || request->tv_sec < 0
+	    || request->tv_nsec < 0 || request->tv_nsec > 999999999L)
+		return -EINVAL;
+
+	switch (clockid) {
+	case CLOCK_REALTIME:
+	case CLOCK_MONOTONIC:
+	case CLOCK_BOOTTIME:
+		break;
+	default:
+		/* CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID, CLOCK_TAI
+		 * not supported by clock_nanosleep on Linux either.
+		 */
+		return -EINVAL;
+	}
+
+	if (flags & TIMER_ABSTIME) {
+		err = uk_sys_clock_gettime(clockid, &now);
+		if (err)
+			return err;
+
+		/* Per POSIX: if the absolute time is in the past or now,
+		 * return 0 immediately without sleeping and without
+		 * modifying remain.
+		 */
+		if (request->tv_sec < now.tv_sec
+		    || (request->tv_sec == now.tv_sec
+			&& request->tv_nsec <= now.tv_nsec))
+			return 0;
+
+		rel.tv_sec  = request->tv_sec  - now.tv_sec;
+		rel.tv_nsec = request->tv_nsec - now.tv_nsec;
+		if (rel.tv_nsec < 0) {
+			rel.tv_sec--;
+			rel.tv_nsec += 1000000000L;
+		}
+
+		/* TIMER_ABSTIME: remain is ignored on EINTR (POSIX). */
+		return uk_sys_nanosleep(&rel, NULL);
+	}
+
+	return uk_sys_nanosleep(request, remain);
 }
 
 UK_SYSCALL_R_DEFINE(int, clock_nanosleep, clockid_t, clockid, int, flags,
